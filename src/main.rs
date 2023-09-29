@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
 use axum::{
@@ -13,7 +13,10 @@ use deadpool_lapin::{Config, PoolConfig, Runtime};
 use futures_lite::StreamExt;
 use lapin::{
     options::{BasicConsumeOptions, BasicQosOptions},
-    types::{AMQPValue::Timestamp, FieldTable, ShortString},
+    types::{
+        AMQPValue::{self, Timestamp},
+        FieldTable, ShortString,
+    },
     Channel,
 };
 
@@ -43,9 +46,11 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // initialize tracing
+    tracing_subscriber::fmt::init();
+
     let mut cfg = Config::default();
-    cfg.url =
-        Some(std::env::var("AMQP_URL").unwrap_or("amqp://guest:guest@localhost:5672/%2f".into()));
+    cfg.url = Some(std::env::var("AMQP_URL").unwrap_or("amqp://guest:guest@localhost:5672".into()));
 
     cfg.pool = Some(PoolConfig::new(5));
 
@@ -55,7 +60,9 @@ async fn main() {
         .route("/", get(get_messages).post(replay))
         .with_state(Arc::new(AppState { pool }));
 
-    axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    tracing::debug!("listening on {}", addr);
+    axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
         .unwrap();
@@ -93,7 +100,8 @@ async fn replay_timeframe(channel: Channel, timeframe: Timeframe) -> Result<()> 
     let mut consumer_args = FieldTable::default();
     consumer_args.insert(
         ShortString::from("x-stream-offset"),
-        Timestamp(timeframe.from.timestamp_millis() as u64),
+        AMQPValue::LongString("first".into()),
+        //Timestamp(timeframe.from.timestamp_millis() as u64),
     );
 
     let mut consumer = channel
@@ -110,7 +118,8 @@ async fn replay_timeframe(channel: Channel, timeframe: Timeframe) -> Result<()> 
         //while delibery timestamp < timeframe.to add to messages else break
         match delivery {
             Ok(delivery) => {
-                //add timestamp plugin
+                println!("got message: {:?}", delivery);
+                tracing::debug!("got message: {:?}", delivery);
             }
             Err(error) => {
                 println!("Error caught in consumer: {}", error);
