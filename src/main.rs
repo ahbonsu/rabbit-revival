@@ -11,12 +11,10 @@ use axum::{
 use chrono::DateTime;
 use deadpool_lapin::{Config, PoolConfig, Runtime};
 use futures_lite::StreamExt;
+use lapin::types::AMQPValue::{self};
 use lapin::{
     options::{BasicConsumeOptions, BasicQosOptions},
-    types::{
-        AMQPValue::{self, Timestamp},
-        FieldTable, ShortString,
-    },
+    types::{FieldTable, ShortString},
     Channel,
 };
 
@@ -132,4 +130,77 @@ async fn replay_timeframe(channel: Channel, timeframe: Timeframe) -> Result<()> 
 
 fn replay_transaction_id(channel: Channel, transaction: Transaction) {
     println!("{:?}", transaction);
+}
+
+#[cfg(test)]
+mod tests {
+    use lapin::{
+        options::{BasicPublishOptions, QueueDeclareOptions, QueueDeleteOptions},
+        protocol::basic::AMQPProperties,
+        types::{AMQPValue, FieldTable, ShortString},
+        Connection, ConnectionProperties,
+    };
+
+    async fn setup() {
+        let connection = Connection::connect(
+            "amqp://guest:guest@localhost:5672",
+            ConnectionProperties::default(),
+        )
+        .await
+        .unwrap();
+
+        let channel = connection.create_channel().await.unwrap();
+
+        let _ = channel
+            .queue_delete("replay", QueueDeleteOptions::default())
+            .await;
+
+        let mut queue_args = FieldTable::default();
+        queue_args.insert(
+            ShortString::from("x-queue-type"),
+            AMQPValue::LongString("stream".into()),
+        );
+
+        channel
+            .queue_declare(
+                "replay",
+                QueueDeclareOptions {
+                    durable: true,
+                    auto_delete: false,
+                    ..Default::default()
+                },
+                queue_args,
+            )
+            .await
+            .unwrap();
+
+        for i in 0..500 {
+            let timestamp = chrono::Utc::now().timestamp_millis() as u64;
+            let transaction_id = format!("transaction_{}", i);
+            let mut headers = FieldTable::default();
+            headers.insert(
+                ShortString::from("transaction_id"),
+                AMQPValue::LongString(transaction_id.clone().into()),
+            );
+
+            channel
+                .basic_publish(
+                    "",
+                    "replay",
+                    BasicPublishOptions::default(),
+                    b"test",
+                    AMQPProperties::default()
+                        .with_headers(headers)
+                        .with_timestamp(timestamp),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foo() {
+        setup().await;
+        assert_eq!(true, true);
+    }
 }
