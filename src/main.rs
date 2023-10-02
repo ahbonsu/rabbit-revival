@@ -10,27 +10,34 @@ use axum::{
 };
 use chrono::DateTime;
 use deadpool_lapin::{Config, PoolConfig, Runtime};
+use replay::{fetch_messages, replay_header, replay_time_frame};
 
 pub mod replay;
 
 #[derive(serde::Deserialize, Debug)]
 #[serde(untagged)]
 enum ReplayMode {
-    Timeframe(Timeframe),
-    Transaction(Transaction),
+    TimeFrameReplay(TimeFrameReplay),
+    HeaderReplay(HeaderReplay),
 }
 
 #[derive(serde::Deserialize, Debug)]
-pub struct Timeframe {
+pub struct TimeFrameReplay {
     queue: String,
     from: DateTime<chrono::Utc>,
     to: DateTime<chrono::Utc>,
 }
 
 #[derive(serde::Deserialize, Debug)]
-pub struct Transaction {
+pub struct HeaderReplay {
     queue: String,
-    transaction_id: String,
+    header: AMQPHeader,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct AMQPHeader {
+    name: String,
+    value: String,
 }
 
 struct AppState {
@@ -65,6 +72,18 @@ async fn get_messages(
     app_state: State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let pool = app_state.pool.clone();
+    let queue = params.get("queue").cloned();
+    let from = params.get("from").cloned();
+    let to = params.get("to").cloned();
+
+    let queue = match queue {
+        Some(queue) => queue.to_string(),
+        None => return (StatusCode::BAD_REQUEST, "Missing queue name"),
+    };
+
+    fetch_messages(&pool, queue, from, to).await;
+    (StatusCode::OK, "Replay successful")
 }
 
 async fn replay(
@@ -72,19 +91,14 @@ async fn replay(
     Json(replay_mode): Json<ReplayMode>,
 ) -> impl IntoResponse {
     let pool = app_state.pool.clone();
-    //TODO: error handling
-    let connection = pool.get().await.unwrap();
-    let channel = connection.create_channel().await.unwrap();
     match replay_mode {
-        ReplayMode::Timeframe(timeframe) => {
-            match replay::replay_timeframe(channel, timeframe).await {
-                Ok(_) => (StatusCode::OK, "Replay successful"),
-                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, "Replay failed"),
-            }
-        }
-        ReplayMode::Transaction(transaction) => {
-            replay::replay_transaction_id(channel, transaction);
+        ReplayMode::TimeFrameReplay(timeframe) => match replay_time_frame(&pool, timeframe).await {
+            Ok(_) => (StatusCode::OK, "Replay successful"),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, "Replay failed"),
+        },
+        ReplayMode::HeaderReplay(transaction) => {
+            replay_header(&pool, transaction);
             (StatusCode::OK, "Replay successful")
         }
-    };
+    }
 }
