@@ -9,8 +9,15 @@ use lapin::{
 
 use anyhow::{anyhow, Result};
 use futures_lite::{stream, StreamExt};
+use serde::Serialize;
 
 use crate::{HeaderReplay, TimeFrameReplay};
+
+#[derive(Serialize, Debug)]
+pub struct ReplayedMessage {
+    headers: FieldTable,
+    data: Vec<u8>,
+}
 
 pub async fn replay_time_frame(
     pool: &deadpool_lapin::Pool,
@@ -58,7 +65,11 @@ pub async fn replay_time_frame(
         }
     }
 
-    publish_message(&connection, messages).await
+    println!("messages: {}", messages.len());
+
+    Ok(())
+
+    //publish_message(&connection, messages).await
 }
 
 pub async fn fetch_messages(
@@ -66,7 +77,7 @@ pub async fn fetch_messages(
     queue: String,
     from: Option<String>,
     to: Option<String>,
-) -> Result<()> {
+) -> Result<Vec<ReplayedMessage>> {
     let message_count = match get_queue_metadata(queue.as_str()).await {
         Some(message_count) => message_count,
         None => return Err(anyhow!("Queue not found or empty")),
@@ -88,12 +99,36 @@ pub async fn fetch_messages(
         )
         .await?;
 
+    let mut messages = Vec::new();
     while let Some(delivery) = consumer.next().await {
         let delivery = delivery?;
         let headers = delivery.properties.headers().as_ref().unwrap();
-    }
+        let mut response_headers = FieldTable::default();
+        delivery.ack(BasicAckOptions::default()).await.expect("ack");
+        if let AMQPValue::LongLongInt(offset) = headers.inner().get("x-stream-offset").unwrap() {
+            if *offset >= i64::try_from(message_count - 1)? {
+                break;
+            }
+            response_headers.insert(
+                ShortString::from("x-stream-offset"),
+                AMQPValue::LongLongInt(*offset),
+            );
+            response_headers.insert(
+                ShortString::from("x-stream-transaction-id"),
+                headers
+                    .inner()
+                    .get("x-stream-transaction-id")
+                    .unwrap()
+                    .clone(),
+            );
 
-    unimplemented!()
+            messages.push(ReplayedMessage {
+                headers: response_headers,
+                data: delivery.data,
+            });
+        }
+    }
+    Ok(messages)
 }
 
 pub fn replay_header(pool: &deadpool_lapin::Pool, header_replay: HeaderReplay) {}
@@ -199,7 +234,7 @@ mod tests {
             let transaction_id = format!("transaction_{}", i);
             let mut headers = FieldTable::default();
             headers.insert(
-                ShortString::from("transaction_id"),
+                ShortString::from("x-stream-transaction-id"),
                 AMQPValue::LongString(transaction_id.clone().into()),
             );
 

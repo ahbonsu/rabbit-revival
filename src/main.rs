@@ -52,6 +52,7 @@ async fn main() {
     let mut cfg = Config::default();
     cfg.url = Some(std::env::var("AMQP_URL").unwrap_or("amqp://guest:guest@localhost:5672".into()));
 
+    // TODO: read from env
     cfg.pool = Some(PoolConfig::new(5));
 
     let pool = cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
@@ -82,7 +83,8 @@ async fn get_messages(
         None => return (StatusCode::BAD_REQUEST, "Missing queue name"),
     };
 
-    fetch_messages(&pool, queue, from, to).await;
+    let res = fetch_messages(&pool, queue, from, to).await;
+    println!("{:?}", res.unwrap());
     (StatusCode::OK, "Replay successful")
 }
 
