@@ -46,29 +46,35 @@ pub async fn replay_time_frame(
         .await?;
 
     let mut messages = Vec::new();
-    while let Some(delivery) = consumer.next().await {
-        let delivery = delivery?;
-        let headers = delivery.properties.headers().as_ref().unwrap();
-        delivery.ack(BasicAckOptions::default()).await.expect("ack");
-        if let AMQPValue::LongLongInt(offset) = headers.inner().get("x-stream-offset").unwrap() {
-            if *offset >= i64::try_from(message_count - 1)? {
-                messages.push(delivery);
-                break;
-            }
-        }
-        if let Some(timestamp) = *delivery.properties.timestamp() {
-            if time_frame.from.timestamp_millis() as u64 <= timestamp
-                && time_frame.to.timestamp_millis() as u64 >= timestamp
-            {
-                messages.push(delivery);
-            }
+    let from = time_frame.from.timestamp_millis() as u64;
+    let to = time_frame.to.timestamp_millis() as u64;
+
+    while let Some(Ok(delivery)) = consumer.next().await {
+        delivery.ack(BasicAckOptions::default()).await?;
+        match delivery.properties.headers().as_ref() {
+            Some(headers) => match headers.inner().get("x-stream-offset") {
+                Some(AMQPValue::LongLongInt(offset)) => {
+                    if let Some(timestamp) = *delivery.properties.timestamp() {
+                        if *offset >= i64::try_from(message_count - 1)? {
+                            if from <= timestamp && to >= timestamp {
+                                messages.push(delivery);
+                            }
+                            break;
+                        }
+                        if from <= timestamp && to >= timestamp {
+                            messages.push(delivery);
+                        }
+                    }
+                }
+                _ => {
+                    return Err(anyhow!("x-stream-offset not found"));
+                }
+            },
+            None => return Err(anyhow!("No headers found")),
         }
     }
-
-    println!("messages: {}", messages.len());
-
+    println!("messages: {:?}", messages.len());
     Ok(())
-
     //publish_message(&connection, messages).await
 }
 
@@ -90,42 +96,91 @@ pub async fn fetch_messages(
         .basic_qos(1000u16, BasicQosOptions { global: false })
         .await?;
 
-    let mut consumer = channel
-        .basic_consume(
-            &queue,
-            "fetch_messages",
-            BasicConsumeOptions::default(),
-            stream_consume_args(AMQPValue::LongString("first".into())),
-        )
-        .await?;
+    let mut consumer = match from {
+        Some(from) => {
+            channel
+                .basic_consume(
+                    &queue,
+                    "fetch_messages",
+                    BasicConsumeOptions::default(),
+                    stream_consume_args(AMQPValue::LongString("first".into())),
+                )
+                .await?
+        }
+        None => {
+            channel
+                .basic_consume(
+                    &queue,
+                    "fetch_messages",
+                    BasicConsumeOptions::default(),
+                    stream_consume_args(AMQPValue::LongString("first".into())),
+                )
+                .await?
+        }
+    };
 
     let mut messages = Vec::new();
-    while let Some(delivery) = consumer.next().await {
-        let delivery = delivery?;
-        let headers = delivery.properties.headers().as_ref().unwrap();
-        let mut response_headers = FieldTable::default();
-        delivery.ack(BasicAckOptions::default()).await.expect("ack");
-        if let AMQPValue::LongLongInt(offset) = headers.inner().get("x-stream-offset").unwrap() {
-            if *offset >= i64::try_from(message_count - 1)? {
-                break;
-            }
-            response_headers.insert(
-                ShortString::from("x-stream-offset"),
-                AMQPValue::LongLongInt(*offset),
-            );
-            response_headers.insert(
-                ShortString::from("x-stream-transaction-id"),
-                headers
-                    .inner()
-                    .get("x-stream-transaction-id")
-                    .unwrap()
-                    .clone(),
-            );
 
-            messages.push(ReplayedMessage {
-                headers: response_headers,
-                data: delivery.data,
-            });
+    while let Some(Ok(delivery)) = consumer.next().await {
+        let mut response_headers = FieldTable::default();
+        delivery.ack(BasicAckOptions::default()).await?;
+        match delivery.properties.headers().as_ref() {
+            Some(headers) => match headers.inner().get("x-stream-offset") {
+                Some(AMQPValue::LongLongInt(offset)) => {
+                    response_headers.insert(
+                        ShortString::from("x-stream-offset"),
+                        AMQPValue::LongLongInt(*offset),
+                    );
+                    response_headers.insert(
+                        ShortString::from("x-stream-transaction-id"),
+                        headers
+                            .inner()
+                            .get("x-stream-transaction-id")
+                            .unwrap()
+                            .clone(),
+                    );
+
+                    match to.as_ref() {
+                        Some(to) => {
+                            let to = to.parse::<u64>()?;
+                            if let Some(timestamp) = *delivery.properties.timestamp() {
+                                if *offset >= i64::try_from(message_count - 1)? {
+                                    if to >= timestamp {
+                                        messages.push(ReplayedMessage {
+                                            headers: response_headers,
+                                            data: delivery.data,
+                                        });
+                                    }
+                                    break;
+                                }
+                                if to >= timestamp {
+                                    messages.push(ReplayedMessage {
+                                        headers: response_headers,
+                                        data: delivery.data,
+                                    });
+                                }
+                            }
+                        }
+                        None => {
+                            if *offset >= i64::try_from(message_count - 1)? {
+                                messages.push(ReplayedMessage {
+                                    headers: response_headers,
+                                    data: delivery.data,
+                                });
+                                break;
+                            }
+                            messages.push(ReplayedMessage {
+                                headers: response_headers,
+                                data: delivery.data,
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    return Err(anyhow!("x-stream-offset not found"));
+                }
+            },
+            _ => return Err(anyhow!("No headers found")),
         }
     }
     Ok(messages)
