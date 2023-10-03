@@ -4,7 +4,7 @@ use axum::{
     extract::Json,
     extract::{Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -72,7 +72,7 @@ async fn main() {
 async fn get_messages(
     app_state: State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> Response {
     let pool = app_state.pool.clone();
     let queue = params.get("queue").cloned();
     let from = params.get("from").cloned();
@@ -80,12 +80,13 @@ async fn get_messages(
 
     let queue = match queue {
         Some(queue) => queue.to_string(),
-        None => return (StatusCode::BAD_REQUEST, "Missing queue name"),
+        None => return (StatusCode::BAD_REQUEST, "Missing queue parameter").into_response(),
     };
 
-    let res = fetch_messages(&pool, queue, from, to).await;
-    println!("{:?}", res.unwrap());
-    (StatusCode::OK, "Replay successful")
+    match fetch_messages(&pool, queue, from, to).await {
+        Ok(messages) => (StatusCode::OK, Json(messages)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn replay(

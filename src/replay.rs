@@ -15,8 +15,9 @@ use crate::{HeaderReplay, TimeFrameReplay};
 
 #[derive(Serialize, Debug)]
 pub struct ReplayedMessage {
-    headers: FieldTable,
-    data: Vec<u8>,
+    offset: u64,
+    transaction_id: Option<String>,
+    data: String,
 }
 
 pub async fn replay_time_frame(
@@ -122,41 +123,34 @@ pub async fn fetch_messages(
     let mut messages = Vec::new();
 
     while let Some(Ok(delivery)) = consumer.next().await {
-        let mut response_headers = FieldTable::default();
         delivery.ack(BasicAckOptions::default()).await?;
         match delivery.properties.headers().as_ref() {
-            Some(headers) => match headers.inner().get("x-stream-offset") {
-                Some(AMQPValue::LongLongInt(offset)) => {
-                    response_headers.insert(
-                        ShortString::from("x-stream-offset"),
-                        AMQPValue::LongLongInt(*offset),
-                    );
-                    response_headers.insert(
-                        ShortString::from("x-stream-transaction-id"),
-                        headers
-                            .inner()
-                            .get("x-stream-transaction-id")
-                            .unwrap()
-                            .clone(),
-                    );
-
-                    match to.as_ref() {
+            Some(headers) => {
+                let transaction_id = match headers.inner().get("x-stream-transaction-id") {
+                    Some(AMQPValue::LongString(transaction_id)) => Some(transaction_id.to_string()),
+                    _ => None,
+                };
+                match headers.inner().get("x-stream-offset") {
+                    Some(AMQPValue::LongLongInt(offset)) => match to.as_ref() {
                         Some(to) => {
-                            let to = to.parse::<u64>()?;
+                            let to =
+                                chrono::DateTime::parse_from_rfc3339(to)?.timestamp_millis() as u64;
                             if let Some(timestamp) = *delivery.properties.timestamp() {
                                 if *offset >= i64::try_from(message_count - 1)? {
                                     if to >= timestamp {
                                         messages.push(ReplayedMessage {
-                                            headers: response_headers,
-                                            data: delivery.data,
+                                            offset: *offset as u64,
+                                            transaction_id,
+                                            data: String::from_utf8(delivery.data)?,
                                         });
                                     }
                                     break;
                                 }
                                 if to >= timestamp {
                                     messages.push(ReplayedMessage {
-                                        headers: response_headers,
-                                        data: delivery.data,
+                                        offset: *offset as u64,
+                                        transaction_id,
+                                        data: String::from_utf8(delivery.data)?,
                                     });
                                 }
                             }
@@ -164,22 +158,24 @@ pub async fn fetch_messages(
                         None => {
                             if *offset >= i64::try_from(message_count - 1)? {
                                 messages.push(ReplayedMessage {
-                                    headers: response_headers,
-                                    data: delivery.data,
+                                    offset: *offset as u64,
+                                    transaction_id,
+                                    data: String::from_utf8(delivery.data)?,
                                 });
                                 break;
                             }
                             messages.push(ReplayedMessage {
-                                headers: response_headers,
-                                data: delivery.data,
+                                offset: *offset as u64,
+                                transaction_id,
+                                data: String::from_utf8(delivery.data)?,
                             });
                         }
+                    },
+                    _ => {
+                        return Err(anyhow!("x-stream-offset not found"));
                     }
                 }
-                _ => {
-                    return Err(anyhow!("x-stream-offset not found"));
-                }
-            },
+            }
             _ => return Err(anyhow!("No headers found")),
         }
     }
@@ -209,9 +205,13 @@ async fn get_queue_metadata(name: &str) -> Option<u64> {
     }
 }
 
-async fn publish_message(connection: &Connection, messages: Vec<Delivery>) -> Result<()> {
+async fn publish_message(
+    connection: &Connection,
+    messages: Vec<Delivery>,
+) -> Result<Vec<ReplayedMessage>, anyhow::Error> {
     let channel = connection.create_channel().await?;
     let mut s = stream::iter(messages);
+    let mut replayed_messages = Vec::new();
     while let Some(message) = s.next().await {
         //TODO: enable as flag -> with transaction id, with timestamp
         let uuid = uuid::Uuid::new_v4().to_string();
@@ -232,8 +232,13 @@ async fn publish_message(connection: &Connection, messages: Vec<Delivery>) -> Re
                     .with_timestamp(timestamp),
             )
             .await?;
+        replayed_messages.push(ReplayedMessage {
+            offset: 0,
+            transaction_id: Some(uuid),
+            data: String::from_utf8(message.data)?,
+        });
     }
-    Ok(())
+    Ok(replayed_messages)
 }
 
 fn stream_consume_args(stream_offset: AMQPValue) -> FieldTable {
