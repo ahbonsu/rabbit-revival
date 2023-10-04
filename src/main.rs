@@ -91,12 +91,12 @@ async fn replay(
     let pool = app_state.pool.clone();
     match replay_mode {
         ReplayMode::TimeFrameReplay(timeframe) => {
-            replay_time_frame(&pool, timeframe).await?;
-            Ok((StatusCode::OK, "Replay successful"))
+            let replayed_messages = replay_time_frame(&pool, timeframe).await?;
+            Ok((StatusCode::OK, Json(replayed_messages)))
         }
         ReplayMode::HeaderReplay(transaction) => {
-            replay_header(&pool, transaction);
-            Ok((StatusCode::OK, "Replay successful"))
+            let replayed_messages = replay_header(&pool, transaction).await?;
+            Ok((StatusCode::OK, Json(replayed_messages)))
         }
     }
 }

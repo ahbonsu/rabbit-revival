@@ -1,3 +1,4 @@
+use chrono::{TimeZone, Utc};
 use lapin::message::Delivery;
 use lapin::options::BasicAckOptions;
 use lapin::types::AMQPValue::{self};
@@ -17,13 +18,14 @@ use crate::{HeaderReplay, MessageQuery, TimeFrameReplay};
 pub struct ReplayedMessage {
     offset: u64,
     transaction_id: Option<String>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
     data: String,
 }
 
 pub async fn replay_time_frame(
     pool: &deadpool_lapin::Pool,
     time_frame: TimeFrameReplay,
-) -> Result<()> {
+) -> Result<Vec<ReplayedMessage>> {
     let message_count = match get_queue_message_count(&time_frame.queue).await? {
         Some(message_count) => message_count,
         None => return Err(anyhow!("Queue not found or empty")),
@@ -41,7 +43,6 @@ pub async fn replay_time_frame(
             &time_frame.queue,
             "replay",
             BasicConsumeOptions::default(),
-            //TODO: use from as offset
             stream_consume_args(AMQPValue::LongString("first".into())),
         )
         .await?;
@@ -74,9 +75,7 @@ pub async fn replay_time_frame(
             None => return Err(anyhow!("No headers found")),
         }
     }
-    println!("messages: {:?}", messages.len());
-    Ok(())
-    //publish_message(&connection, messages).await
+    publish_message(&connection, messages).await
 }
 
 pub async fn fetch_messages(
@@ -97,28 +96,14 @@ pub async fn fetch_messages(
         .basic_qos(1000u16, BasicQosOptions { global: false })
         .await?;
 
-    let mut consumer = match message_query.from {
-        Some(from) => {
-            channel
-                .basic_consume(
-                    &message_query.queue,
-                    "fetch_messages",
-                    BasicConsumeOptions::default(),
-                    stream_consume_args(AMQPValue::Timestamp(from.timestamp_millis() as u64)),
-                )
-                .await?
-        }
-        None => {
-            channel
-                .basic_consume(
-                    &message_query.queue,
-                    "fetch_messages",
-                    BasicConsumeOptions::default(),
-                    stream_consume_args(AMQPValue::LongString("first".into())),
-                )
-                .await?
-        }
-    };
+    let mut consumer = channel
+        .basic_consume(
+            &message_query.queue,
+            "fetch_messages",
+            BasicConsumeOptions::default(),
+            stream_consume_args(AMQPValue::LongString("first".into())),
+        )
+        .await?;
 
     let mut messages = Vec::new();
 
@@ -131,45 +116,35 @@ pub async fn fetch_messages(
                     _ => None,
                 };
                 match headers.inner().get("x-stream-offset") {
-                    Some(AMQPValue::LongLongInt(offset)) => match message_query.to {
-                        Some(to) => {
-                            let to = to.timestamp_millis() as u64;
-                            if let Some(timestamp) = *delivery.properties.timestamp() {
-                                if *offset >= i64::try_from(message_count - 1)? {
-                                    if to >= timestamp {
-                                        messages.push(ReplayedMessage {
-                                            offset: *offset as u64,
-                                            transaction_id,
-                                            data: String::from_utf8(delivery.data)?,
-                                        });
-                                    }
-                                    break;
-                                }
-                                if to >= timestamp {
-                                    messages.push(ReplayedMessage {
-                                        offset: *offset as u64,
-                                        transaction_id,
-                                        data: String::from_utf8(delivery.data)?,
-                                    });
-                                }
-                            }
-                        }
-                        None => {
-                            if *offset >= i64::try_from(message_count - 1)? {
+                    Some(AMQPValue::LongLongInt(offset)) => {
+                        let timestamp = *delivery.properties.timestamp();
+                        if *offset >= i64::try_from(message_count - 1)? {
+                            if is_within_timeframe(timestamp, message_query.from, message_query.to)
+                            {
                                 messages.push(ReplayedMessage {
                                     offset: *offset as u64,
                                     transaction_id,
+                                    timestamp: Some(
+                                        //unwrap is save here, because we checked if timestamp is set
+                                        chrono::Utc.timestamp_millis(timestamp.unwrap() as i64),
+                                    ),
                                     data: String::from_utf8(delivery.data)?,
                                 });
-                                break;
                             }
+                            break;
+                        }
+                        if is_within_timeframe(timestamp, message_query.from, message_query.to) {
                             messages.push(ReplayedMessage {
                                 offset: *offset as u64,
                                 transaction_id,
+                                timestamp: Some(
+                                    //unwrap is save here, because we checked if timestamp is set
+                                    chrono::Utc.timestamp_millis(timestamp.unwrap() as i64),
+                                ),
                                 data: String::from_utf8(delivery.data)?,
                             });
                         }
-                    },
+                    }
                     _ => {
                         return Err(anyhow!("x-stream-offset not found"));
                     }
@@ -181,7 +156,12 @@ pub async fn fetch_messages(
     Ok(messages)
 }
 
-pub fn replay_header(pool: &deadpool_lapin::Pool, header_replay: HeaderReplay) {}
+pub async fn replay_header(
+    pool: &deadpool_lapin::Pool,
+    header_replay: HeaderReplay,
+) -> Result<Vec<ReplayedMessage>> {
+    unimplemented!()
+}
 
 async fn get_queue_message_count(name: &str) -> Result<Option<u64>> {
     let client = reqwest::Client::new();
@@ -218,7 +198,8 @@ async fn publish_message(
     while let Some(message) = s.next().await {
         //TODO: enable as flag -> with transaction id, with timestamp
         let uuid = uuid::Uuid::new_v4().to_string();
-        let timestamp = chrono::Utc::now().timestamp_millis() as u64;
+        let timestamp = chrono::Utc::now();
+        let timestamp_u64 = timestamp.timestamp_millis() as u64;
         let mut headers = FieldTable::default();
         headers.insert(
             ShortString::from("x-stream-transaction-id"),
@@ -232,12 +213,13 @@ async fn publish_message(
                 message.data.as_slice(),
                 lapin::BasicProperties::default()
                     .with_headers(headers)
-                    .with_timestamp(timestamp),
+                    .with_timestamp(timestamp_u64),
             )
             .await?;
         replayed_messages.push(ReplayedMessage {
             offset: 0,
             transaction_id: Some(uuid),
+            timestamp: Some(timestamp),
             data: String::from_utf8(message.data)?,
         });
     }
@@ -248,6 +230,25 @@ fn stream_consume_args(stream_offset: AMQPValue) -> FieldTable {
     let mut args = FieldTable::default();
     args.insert(ShortString::from("x-stream-offset"), stream_offset);
     args
+}
+
+fn is_within_timeframe(
+    date: Option<u64>,
+    from: Option<chrono::DateTime<chrono::Utc>>,
+    to: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    match date {
+        Some(date) => {
+            let date = Utc.timestamp_millis(date as i64);
+            match (from, to) {
+                (Some(from), Some(to)) => date >= from && date <= to,
+                (Some(from), None) => date >= from,
+                (None, Some(to)) => date <= to,
+                (None, None) => true,
+            }
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
