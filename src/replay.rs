@@ -24,7 +24,7 @@ pub async fn replay_time_frame(
     pool: &deadpool_lapin::Pool,
     time_frame: TimeFrameReplay,
 ) -> Result<()> {
-    let message_count = match get_queue_message_count(&time_frame.queue).await {
+    let message_count = match get_queue_message_count(&time_frame.queue).await? {
         Some(message_count) => message_count,
         None => return Err(anyhow!("Queue not found or empty")),
     };
@@ -83,9 +83,11 @@ pub async fn fetch_messages(
     pool: &deadpool_lapin::Pool,
     message_query: MessageQuery,
 ) -> Result<Vec<ReplayedMessage>> {
-    let message_count = match get_queue_message_count(message_query.queue.as_str()).await {
+    let message_count = match get_queue_message_count(message_query.queue.as_str()).await? {
         Some(message_count) => message_count,
-        None => return Err(anyhow!("Queue not found or empty")),
+        None => {
+            return Err(anyhow!("Queue not found or empty"));
+        }
     };
 
     let connection = pool.get().await?;
@@ -102,7 +104,7 @@ pub async fn fetch_messages(
                     &message_query.queue,
                     "fetch_messages",
                     BasicConsumeOptions::default(),
-                    stream_consume_args(AMQPValue::LongString("first".into())),
+                    stream_consume_args(AMQPValue::Timestamp(from.timestamp_millis() as u64)),
                 )
                 .await?
         }
@@ -181,31 +183,35 @@ pub async fn fetch_messages(
 
 pub fn replay_header(pool: &deadpool_lapin::Pool, header_replay: HeaderReplay) {}
 
-async fn get_queue_message_count(name: &str) -> Option<u64> {
+async fn get_queue_message_count(name: &str) -> Result<Option<u64>> {
     let client = reqwest::Client::new();
 
     let res = client
         .get("http://localhost:15672/api/queues/%2F/".to_string() + name)
         .basic_auth("guest", Some("guest"))
         .send()
-        .await
-        .ok()?
+        .await?
         .json::<serde_json::Value>()
-        .await
-        .ok()?;
+        .await?;
+
+    if let Some(res) = res.get("type") {
+        if res != "stream" {
+            return Err(anyhow!("Queue is not a stream"));
+        }
+    }
 
     let message_count = res.get("messages");
 
     match message_count {
-        Some(message_count) => Some(message_count.as_u64().unwrap()),
-        _ => None,
+        Some(message_count) => Ok(Some(message_count.as_u64().unwrap())),
+        None => Ok(None),
     }
 }
 
 async fn publish_message(
     connection: &Connection,
     messages: Vec<Delivery>,
-) -> Result<Vec<ReplayedMessage>, anyhow::Error> {
+) -> Result<Vec<ReplayedMessage>> {
     let channel = connection.create_channel().await?;
     let mut s = stream::iter(messages);
     let mut replayed_messages = Vec::new();
