@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::Json,
@@ -40,6 +40,13 @@ struct AMQPHeader {
     value: String,
 }
 
+#[derive(serde::Deserialize, Debug)]
+pub struct MessageQuery {
+    queue: String,
+    from: Option<DateTime<chrono::Utc>>,
+    to: Option<DateTime<chrono::Utc>>,
+}
+
 struct AppState {
     pool: deadpool_lapin::Pool,
 }
@@ -71,37 +78,51 @@ async fn main() {
 
 async fn get_messages(
     app_state: State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let pool = app_state.pool.clone();
-    let queue = params.get("queue").cloned();
-    let from = params.get("from").cloned();
-    let to = params.get("to").cloned();
-
-    let queue = match queue {
-        Some(queue) => queue.to_string(),
-        None => return (StatusCode::BAD_REQUEST, "Missing queue parameter").into_response(),
-    };
-
-    match fetch_messages(&pool, queue, from, to).await {
-        Ok(messages) => (StatusCode::OK, Json(messages)).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    Query(message_query): Query<MessageQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let messages = fetch_messages(&app_state.pool.clone(), message_query).await?;
+    Ok((StatusCode::OK, Json(messages)))
 }
 
 async fn replay(
     app_state: State<Arc<AppState>>,
     Json(replay_mode): Json<ReplayMode>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, AppError> {
     let pool = app_state.pool.clone();
     match replay_mode {
-        ReplayMode::TimeFrameReplay(timeframe) => match replay_time_frame(&pool, timeframe).await {
-            Ok(_) => (StatusCode::OK, "Replay successful"),
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, "Replay failed"),
-        },
+        ReplayMode::TimeFrameReplay(timeframe) => {
+            replay_time_frame(&pool, timeframe).await?;
+            Ok((StatusCode::OK, "Replay successful"))
+        }
         ReplayMode::HeaderReplay(transaction) => {
             replay_header(&pool, transaction);
-            (StatusCode::OK, "Replay successful")
+            Ok((StatusCode::OK, "Replay successful"))
         }
+    }
+}
+
+//https://github.com/tokio-rs/axum/blob/main/examples/anyhow-error-response/src/main.rs
+// Make our own error that wraps `anyhow::Error`.
+struct AppError(anyhow::Error);
+
+// Tell axum how to convert `AppError` into a response.
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Something went wrong: {}", self.0),
+        )
+            .into_response()
+    }
+}
+
+// This enables using `?` on functions that return `Result<_, anyhow::Error>` to turn them into
+// `Result<_, AppError>`. That way you don't need to do that manually.
+impl<E> From<E> for AppError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        Self(err.into())
     }
 }

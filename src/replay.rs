@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use futures_lite::{stream, StreamExt};
 use serde::Serialize;
 
-use crate::{HeaderReplay, TimeFrameReplay};
+use crate::{HeaderReplay, MessageQuery, TimeFrameReplay};
 
 #[derive(Serialize, Debug)]
 pub struct ReplayedMessage {
@@ -24,7 +24,7 @@ pub async fn replay_time_frame(
     pool: &deadpool_lapin::Pool,
     time_frame: TimeFrameReplay,
 ) -> Result<()> {
-    let message_count = match get_queue_metadata(&time_frame.queue).await {
+    let message_count = match get_queue_message_count(&time_frame.queue).await {
         Some(message_count) => message_count,
         None => return Err(anyhow!("Queue not found or empty")),
     };
@@ -81,11 +81,9 @@ pub async fn replay_time_frame(
 
 pub async fn fetch_messages(
     pool: &deadpool_lapin::Pool,
-    queue: String,
-    from: Option<String>,
-    to: Option<String>,
+    message_query: MessageQuery,
 ) -> Result<Vec<ReplayedMessage>> {
-    let message_count = match get_queue_metadata(queue.as_str()).await {
+    let message_count = match get_queue_message_count(message_query.queue.as_str()).await {
         Some(message_count) => message_count,
         None => return Err(anyhow!("Queue not found or empty")),
     };
@@ -97,11 +95,11 @@ pub async fn fetch_messages(
         .basic_qos(1000u16, BasicQosOptions { global: false })
         .await?;
 
-    let mut consumer = match from {
+    let mut consumer = match message_query.from {
         Some(from) => {
             channel
                 .basic_consume(
-                    &queue,
+                    &message_query.queue,
                     "fetch_messages",
                     BasicConsumeOptions::default(),
                     stream_consume_args(AMQPValue::LongString("first".into())),
@@ -111,7 +109,7 @@ pub async fn fetch_messages(
         None => {
             channel
                 .basic_consume(
-                    &queue,
+                    &message_query.queue,
                     "fetch_messages",
                     BasicConsumeOptions::default(),
                     stream_consume_args(AMQPValue::LongString("first".into())),
@@ -131,10 +129,9 @@ pub async fn fetch_messages(
                     _ => None,
                 };
                 match headers.inner().get("x-stream-offset") {
-                    Some(AMQPValue::LongLongInt(offset)) => match to.as_ref() {
+                    Some(AMQPValue::LongLongInt(offset)) => match message_query.to {
                         Some(to) => {
-                            let to =
-                                chrono::DateTime::parse_from_rfc3339(to)?.timestamp_millis() as u64;
+                            let to = to.timestamp_millis() as u64;
                             if let Some(timestamp) = *delivery.properties.timestamp() {
                                 if *offset >= i64::try_from(message_count - 1)? {
                                     if to >= timestamp {
@@ -184,7 +181,7 @@ pub async fn fetch_messages(
 
 pub fn replay_header(pool: &deadpool_lapin::Pool, header_replay: HeaderReplay) {}
 
-async fn get_queue_metadata(name: &str) -> Option<u64> {
+async fn get_queue_message_count(name: &str) -> Option<u64> {
     let client = reqwest::Client::new();
 
     let res = client
@@ -219,7 +216,7 @@ async fn publish_message(
         let mut headers = FieldTable::default();
         headers.insert(
             ShortString::from("x-stream-transaction-id"),
-            AMQPValue::LongString(uuid.into()),
+            AMQPValue::LongString(uuid.as_str().into()),
         );
         channel
             .basic_publish(
