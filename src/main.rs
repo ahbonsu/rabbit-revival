@@ -11,6 +11,8 @@ use axum::{
 use chrono::DateTime;
 use deadpool_lapin::{Config, PoolConfig, Runtime};
 use replay::{fetch_messages, replay_header, replay_time_frame};
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 pub mod replay;
 
@@ -54,22 +56,43 @@ struct AppState {
 #[tokio::main]
 async fn main() {
     // initialize tracing
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "rabbit_revival=debug,tower_http=trace,axum::rejection=trace".into()
+            }),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let pool_size = std::env::var("AMQP_CONNECTION_POOL_SIZE")
+        .unwrap_or("5".into())
+        .parse::<usize>()
+        .unwrap();
+
+    let username = std::env::var("AMQP_USERNAME").unwrap_or("guest".into());
+    let password = std::env::var("AMQP_PASSWORD").unwrap_or("guest".into());
+    let host = std::env::var("AMQP_HOST").unwrap_or("localhost".into());
+    let port = std::env::var("AMQP_PORT").unwrap_or("5672".into());
 
     let mut cfg = Config::default();
-    cfg.url = Some(std::env::var("AMQP_URL").unwrap_or("amqp://guest:guest@localhost:5672".into()));
+    cfg.url = Some(format!(
+        "amqp://{}:{}@{}:{}/%2f",
+        username, password, host, port
+    ));
 
-    // TODO: read from env
-    cfg.pool = Some(PoolConfig::new(5));
+    cfg.pool = Some(PoolConfig::new(pool_size));
 
     let pool = cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
 
     let app = Router::new()
         .route("/", get(get_messages).post(replay))
+        .layer(TraceLayer::new_for_http())
         .with_state(Arc::new(AppState { pool }));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::debug!("listening on {}", addr);
+
+    tracing::info!("Listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
         .await
