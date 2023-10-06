@@ -17,6 +17,7 @@ use crate::{HeaderReplay, MessageQuery, TimeFrameReplay};
 #[derive(Serialize, Debug)]
 pub struct ReplayedMessage {
     offset: u64,
+    #[serde(rename = "x-stream-transaction-id")]
     transaction_id: Option<String>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     data: String,
@@ -48,31 +49,32 @@ pub async fn replay_time_frame(
         .await?;
 
     let mut messages = Vec::new();
-    let from = time_frame.from.timestamp_millis() as u64;
-    let to = time_frame.to.timestamp_millis() as u64;
-
     while let Some(Ok(delivery)) = consumer.next().await {
         delivery.ack(BasicAckOptions::default()).await?;
-        match delivery.properties.headers().as_ref() {
-            Some(headers) => match headers.inner().get("x-stream-offset") {
-                Some(AMQPValue::LongLongInt(offset)) => {
-                    if let Some(timestamp) = *delivery.properties.timestamp() {
-                        if *offset >= i64::try_from(message_count - 1)? {
-                            if from <= timestamp && to >= timestamp {
-                                messages.push(delivery);
-                            }
-                            break;
-                        }
-                        if from <= timestamp && to >= timestamp {
-                            messages.push(delivery);
-                        }
-                    }
-                }
-                _ => {
-                    return Err(anyhow!("x-stream-offset not found"));
-                }
-            },
+        let headers = match delivery.properties.headers().as_ref() {
+            Some(headers) => headers,
             None => return Err(anyhow!("No headers found")),
+        };
+        let offset = match headers.inner().get("x-stream-offset") {
+            Some(AMQPValue::LongLongInt(offset)) => offset,
+            _ => return Err(anyhow!("x-stream-offset not found")),
+        };
+        let timestamp = *delivery.properties.timestamp();
+
+        match is_within_timeframe(timestamp, Some(time_frame.from), Some(time_frame.to)) {
+            Some(true) => {
+                if *offset >= i64::try_from(message_count - 1)? {
+                    messages.push(delivery);
+                    break;
+                }
+                messages.push(delivery);
+            }
+            _ => {
+                if *offset >= i64::try_from(message_count - 1)? {
+                    break;
+                }
+                continue;
+            }
         }
     }
     publish_message(&connection, messages).await
@@ -109,52 +111,75 @@ pub async fn fetch_messages(
 
     while let Some(Ok(delivery)) = consumer.next().await {
         delivery.ack(BasicAckOptions::default()).await?;
-        match delivery.properties.headers().as_ref() {
-            Some(headers) => {
-                let transaction_id = match headers.inner().get("x-stream-transaction-id") {
-                    Some(AMQPValue::LongString(transaction_id)) => Some(transaction_id.to_string()),
-                    _ => None,
-                };
-                match headers.inner().get("x-stream-offset") {
-                    Some(AMQPValue::LongLongInt(offset)) => {
-                        let timestamp = *delivery.properties.timestamp();
-                        if *offset >= i64::try_from(message_count - 1)? {
-                            if is_within_timeframe(timestamp, message_query.from, message_query.to)
-                            {
-                                messages.push(ReplayedMessage {
-                                    offset: *offset as u64,
-                                    transaction_id,
-                                    timestamp: Some(
-                                        //unwrap is save here, because we checked if timestamp is set
-                                        chrono::Utc
-                                            .timestamp_millis_opt(timestamp.unwrap() as i64)
-                                            .unwrap(),
-                                    ),
-                                    data: String::from_utf8(delivery.data)?,
-                                });
-                            }
-                            break;
-                        }
-                        if is_within_timeframe(timestamp, message_query.from, message_query.to) {
-                            messages.push(ReplayedMessage {
-                                offset: *offset as u64,
-                                transaction_id,
-                                timestamp: Some(
-                                    //unwrap is save here, because we checked if timestamp is set
-                                    chrono::Utc
-                                        .timestamp_millis_opt(timestamp.unwrap() as i64)
-                                        .unwrap(),
-                                ),
-                                data: String::from_utf8(delivery.data)?,
-                            });
-                        }
-                    }
-                    _ => {
-                        return Err(anyhow!("x-stream-offset not found"));
-                    }
+
+        let headers = match delivery.properties.headers().as_ref() {
+            Some(headers) => headers,
+            None => return Err(anyhow!("No headers found")),
+        };
+
+        let transaction_id = match headers.inner().get("x-stream-transaction-id") {
+            Some(AMQPValue::LongString(transaction_id)) => Some(transaction_id.to_string()),
+            _ => None,
+        };
+
+        let offset = match headers.inner().get("x-stream-offset") {
+            Some(AMQPValue::LongLongInt(offset)) => offset,
+            _ => return Err(anyhow!("x-stream-offset not found")),
+        };
+
+        let timestamp = *delivery.properties.timestamp();
+
+        match is_within_timeframe(timestamp, message_query.from, message_query.to) {
+            Some(true) => {
+                if *offset >= i64::try_from(message_count - 1)? {
+                    messages.push(ReplayedMessage {
+                        offset: *offset as u64,
+                        transaction_id,
+                        timestamp: Some(
+                            //unwrap is save here, because we checked if timestamp is set
+                            chrono::Utc
+                                .timestamp_millis_opt(timestamp.unwrap() as i64)
+                                .unwrap(),
+                        ),
+                        data: String::from_utf8(delivery.data)?,
+                    });
+                    break;
                 }
+                messages.push(ReplayedMessage {
+                    offset: *offset as u64,
+                    transaction_id,
+                    timestamp: Some(
+                        //unwrap is save here, because we checked if timestamp is set
+                        chrono::Utc
+                            .timestamp_millis_opt(timestamp.unwrap() as i64)
+                            .unwrap(),
+                    ),
+                    data: String::from_utf8(delivery.data)?,
+                });
             }
-            _ => return Err(anyhow!("No headers found")),
+            Some(false) => {
+                if *offset >= i64::try_from(message_count - 1)? {
+                    break;
+                }
+                continue;
+            }
+            None => {
+                if *offset >= i64::try_from(message_count - 1)? {
+                    messages.push(ReplayedMessage {
+                        offset: *offset as u64,
+                        transaction_id,
+                        timestamp: None,
+                        data: String::from_utf8(delivery.data)?,
+                    });
+                    break;
+                }
+                messages.push(ReplayedMessage {
+                    offset: *offset as u64,
+                    transaction_id,
+                    timestamp: None,
+                    data: String::from_utf8(delivery.data)?,
+                });
+            }
         }
     }
     Ok(messages)
@@ -190,29 +215,30 @@ pub async fn replay_header(
 
     while let Some(Ok(delivery)) = consumer.next().await {
         delivery.ack(BasicAckOptions::default()).await?;
-        match delivery.properties.headers() {
-            Some(headers) => {
-                let target_header = headers.inner().get(header_replay.header.name.as_str());
-                let offset = match headers.inner().get("x-stream-offset") {
-                    Some(AMQPValue::LongLongInt(offset)) => offset,
-                    _ => return Err(anyhow!("Queue is not a stream")),
-                };
+        let headers = match delivery.properties.headers().as_ref() {
+            Some(headers) => headers,
+            None => return Err(anyhow!("No headers found")),
+        };
 
-                if *offset >= i64::try_from(message_count - 1)? {
-                    if let Some(AMQPValue::LongString(header)) = target_header {
-                        if *header.to_string() == header_replay.header.value {
-                            messages.push(delivery);
-                        }
-                    }
-                    break;
-                }
-                if let Some(AMQPValue::LongString(header)) = target_header {
-                    if *header.to_string() == header_replay.header.value {
-                        messages.push(delivery);
-                    }
+        let target_header = headers.inner().get(header_replay.header.name.as_str());
+        let offset = match headers.inner().get("x-stream-offset") {
+            Some(AMQPValue::LongLongInt(offset)) => offset,
+            _ => return Err(anyhow!("Queue is not a stream")),
+        };
+
+        if *offset >= i64::try_from(message_count - 1)? {
+            if let Some(AMQPValue::LongString(header)) = target_header {
+                if *header.to_string() == header_replay.header.value {
+                    messages.push(delivery);
                 }
             }
-            None => return Err(anyhow!("No headers found")),
+            break;
+        }
+
+        if let Some(AMQPValue::LongString(header)) = target_header {
+            if *header.to_string() == header_replay.header.value {
+                messages.push(delivery);
+            }
         }
     }
     publish_message(&connection, messages).await
@@ -291,18 +317,21 @@ fn is_within_timeframe(
     date: Option<u64>,
     from: Option<chrono::DateTime<chrono::Utc>>,
     to: Option<chrono::DateTime<chrono::Utc>>,
-) -> bool {
+) -> Option<bool> {
     match date {
         Some(date) => {
             let date = Utc.timestamp_millis_opt(date as i64).unwrap();
             match (from, to) {
-                (Some(from), Some(to)) => date >= from && date <= to,
-                (Some(from), None) => date >= from,
-                (None, Some(to)) => date <= to,
-                (None, None) => true,
+                (Some(from), Some(to)) => Some(date >= from && date <= to),
+                (Some(from), None) => Some(date >= from),
+                (None, Some(to)) => Some(date <= to),
+                (None, None) => Some(true),
             }
         }
-        None => false,
+        None => match (from, to) {
+            (None, None) => Some(true),
+            _ => Some(false),
+        },
     }
 }
 
@@ -353,7 +382,7 @@ mod tests {
             let transaction_id = format!("transaction_{}", i);
             let mut headers = FieldTable::default();
             headers.insert(
-                ShortString::from("transaction_id"),
+                ShortString::from("x-stream-transaction-id"),
                 AMQPValue::LongString(transaction_id.clone().into()),
             );
 
@@ -369,6 +398,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
 
