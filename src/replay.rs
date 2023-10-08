@@ -16,7 +16,8 @@ use crate::{HeaderReplay, MessageQuery, TimeFrameReplay};
 
 #[derive(Serialize, Debug)]
 pub struct ReplayedMessage {
-    offset: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<u64>,
     #[serde(rename = "x-stream-transaction-id")]
     transaction_id: Option<String>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
@@ -133,7 +134,7 @@ pub async fn fetch_messages(
             Some(true) => {
                 if *offset >= i64::try_from(message_count - 1)? {
                     messages.push(ReplayedMessage {
-                        offset: *offset as u64,
+                        offset: Some(*offset as u64),
                         transaction_id,
                         timestamp: Some(
                             //unwrap is save here, because we checked if timestamp is set
@@ -146,7 +147,7 @@ pub async fn fetch_messages(
                     break;
                 }
                 messages.push(ReplayedMessage {
-                    offset: *offset as u64,
+                    offset: Some(*offset as u64),
                     transaction_id,
                     timestamp: Some(
                         //unwrap is save here, because we checked if timestamp is set
@@ -166,7 +167,7 @@ pub async fn fetch_messages(
             None => {
                 if *offset >= i64::try_from(message_count - 1)? {
                     messages.push(ReplayedMessage {
-                        offset: *offset as u64,
+                        offset: Some(*offset as u64),
                         transaction_id,
                         timestamp: None,
                         data: String::from_utf8(delivery.data)?,
@@ -174,7 +175,7 @@ pub async fn fetch_messages(
                     break;
                 }
                 messages.push(ReplayedMessage {
-                    offset: *offset as u64,
+                    offset: Some(*offset as u64),
                     transaction_id,
                     timestamp: None,
                     data: String::from_utf8(delivery.data)?,
@@ -298,7 +299,7 @@ async fn publish_message(
             )
             .await?;
         replayed_messages.push(ReplayedMessage {
-            offset: 0,
+            offset: None,
             transaction_id: Some(uuid),
             timestamp: Some(timestamp),
             data: String::from_utf8(message.data)?,
