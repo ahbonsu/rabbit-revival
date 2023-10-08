@@ -2,7 +2,6 @@ use chrono::{TimeZone, Utc};
 use lapin::message::Delivery;
 use lapin::options::BasicAckOptions;
 use lapin::types::AMQPValue::{self};
-use lapin::Connection;
 use lapin::{
     options::{BasicConsumeOptions, BasicQosOptions},
     types::{FieldTable, ShortString},
@@ -12,26 +11,33 @@ use anyhow::{anyhow, Result};
 use futures_lite::{stream, StreamExt};
 use serde::Serialize;
 
-use crate::{HeaderReplay, MessageQuery, TimeFrameReplay};
+use crate::{HeaderReplay, MessageOptions, MessageQuery, RabbitmqApiConfig, TimeFrameReplay};
 
 #[derive(Serialize, Debug)]
 pub struct ReplayedMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u64>,
-    #[serde(rename = "x-stream-transaction-id")]
-    transaction_id: Option<String>,
+    transaction: Option<TransactionHeader>,
     timestamp: Option<chrono::DateTime<chrono::Utc>>,
     data: String,
 }
 
+#[derive(Serialize, Debug)]
+pub struct TransactionHeader {
+    name: String,
+    value: String,
+}
+
 pub async fn replay_time_frame(
     pool: &deadpool_lapin::Pool,
+    rabbitmq_api_config: &RabbitmqApiConfig,
     time_frame: TimeFrameReplay,
-) -> Result<Vec<ReplayedMessage>> {
-    let message_count = match get_queue_message_count(&time_frame.queue).await? {
-        Some(message_count) => message_count,
-        None => return Err(anyhow!("Queue not found or empty")),
-    };
+) -> Result<Vec<Delivery>> {
+    let message_count =
+        match get_queue_message_count(&rabbitmq_api_config, &time_frame.queue).await? {
+            Some(message_count) => message_count,
+            None => return Err(anyhow!("Queue not found or empty")),
+        };
 
     let connection = pool.get().await?;
     let channel = connection.create_channel().await?;
@@ -78,19 +84,22 @@ pub async fn replay_time_frame(
             }
         }
     }
-    publish_message(&connection, messages).await
+    Ok(messages)
 }
 
 pub async fn fetch_messages(
     pool: &deadpool_lapin::Pool,
+    rabbitmq_api_config: &RabbitmqApiConfig,
+    message_options: &MessageOptions,
     message_query: MessageQuery,
 ) -> Result<Vec<ReplayedMessage>> {
-    let message_count = match get_queue_message_count(message_query.queue.as_str()).await? {
-        Some(message_count) => message_count,
-        None => {
-            return Err(anyhow!("Queue not found or empty"));
-        }
-    };
+    let message_count =
+        match get_queue_message_count(&rabbitmq_api_config, message_query.queue.as_str()).await? {
+            Some(message_count) => message_count,
+            None => {
+                return Err(anyhow!("Queue not found or empty"));
+            }
+        };
 
     let connection = pool.get().await?;
     let channel = connection.create_channel().await?;
@@ -118,9 +127,15 @@ pub async fn fetch_messages(
             None => return Err(anyhow!("No headers found")),
         };
 
-        let transaction_id = match headers.inner().get("x-stream-transaction-id") {
-            Some(AMQPValue::LongString(transaction_id)) => Some(transaction_id.to_string()),
-            _ => None,
+        let transaction = match message_options.transaction_header.clone() {
+            Some(transaction_header) => match headers.inner().get(transaction_header.as_str()) {
+                Some(AMQPValue::LongString(transaction_id)) => Some(TransactionHeader {
+                    name: transaction_header,
+                    value: transaction_id.to_string(),
+                }),
+                _ => None,
+            },
+            None => None,
         };
 
         let offset = match headers.inner().get("x-stream-offset") {
@@ -135,7 +150,7 @@ pub async fn fetch_messages(
                 if *offset >= i64::try_from(message_count - 1)? {
                     messages.push(ReplayedMessage {
                         offset: Some(*offset as u64),
-                        transaction_id,
+                        transaction,
                         timestamp: Some(
                             //unwrap is save here, because we checked if timestamp is set
                             chrono::Utc
@@ -148,7 +163,7 @@ pub async fn fetch_messages(
                 }
                 messages.push(ReplayedMessage {
                     offset: Some(*offset as u64),
-                    transaction_id,
+                    transaction,
                     timestamp: Some(
                         //unwrap is save here, because we checked if timestamp is set
                         chrono::Utc
@@ -168,7 +183,7 @@ pub async fn fetch_messages(
                 if *offset >= i64::try_from(message_count - 1)? {
                     messages.push(ReplayedMessage {
                         offset: Some(*offset as u64),
-                        transaction_id,
+                        transaction,
                         timestamp: None,
                         data: String::from_utf8(delivery.data)?,
                     });
@@ -176,7 +191,7 @@ pub async fn fetch_messages(
                 }
                 messages.push(ReplayedMessage {
                     offset: Some(*offset as u64),
-                    transaction_id,
+                    transaction,
                     timestamp: None,
                     data: String::from_utf8(delivery.data)?,
                 });
@@ -188,12 +203,14 @@ pub async fn fetch_messages(
 
 pub async fn replay_header(
     pool: &deadpool_lapin::Pool,
+    rabbitmq_api_config: &RabbitmqApiConfig,
     header_replay: HeaderReplay,
-) -> Result<Vec<ReplayedMessage>> {
-    let message_count = match get_queue_message_count(&header_replay.queue).await? {
-        Some(message_count) => message_count,
-        None => return Err(anyhow!("Queue not found or empty")),
-    };
+) -> Result<Vec<Delivery>> {
+    let message_count =
+        match get_queue_message_count(&rabbitmq_api_config, &header_replay.queue).await? {
+            Some(message_count) => message_count,
+            None => return Err(anyhow!("Queue not found or empty")),
+        };
 
     let connection = pool.get().await?;
 
@@ -242,15 +259,26 @@ pub async fn replay_header(
             }
         }
     }
-    publish_message(&connection, messages).await
+    Ok(messages)
 }
 
-async fn get_queue_message_count(name: &str) -> Result<Option<u64>> {
+async fn get_queue_message_count(
+    rabitmq_api_config: &RabbitmqApiConfig,
+    name: &str,
+) -> Result<Option<u64>> {
     let client = reqwest::Client::new();
 
+    let url = format!(
+        "http://{}:{}/api/queues/%2f/{}",
+        rabitmq_api_config.host, rabitmq_api_config.port, name
+    );
+
     let res = client
-        .get("http://localhost:15672/api/queues/%2F/".to_string() + name)
-        .basic_auth("guest", Some("guest"))
+        .get(url)
+        .basic_auth(
+            rabitmq_api_config.username.clone(),
+            Some(rabitmq_api_config.password.clone()),
+        )
         .send()
         .await?
         .json::<serde_json::Value>()
@@ -270,40 +298,114 @@ async fn get_queue_message_count(name: &str) -> Result<Option<u64>> {
     }
 }
 
-async fn publish_message(
-    connection: &Connection,
+pub async fn publish_message(
+    pool: &deadpool_lapin::Pool,
+    message_options: &MessageOptions,
     messages: Vec<Delivery>,
 ) -> Result<Vec<ReplayedMessage>> {
+    let connection = pool.get().await?;
     let channel = connection.create_channel().await?;
     let mut s = stream::iter(messages);
     let mut replayed_messages = Vec::new();
+
     while let Some(message) = s.next().await {
-        //TODO: enable as flag -> with transaction id, with timestamp
-        let uuid = uuid::Uuid::new_v4().to_string();
-        let timestamp = chrono::Utc::now();
-        let timestamp_u64 = timestamp.timestamp_millis() as u64;
-        let mut headers = FieldTable::default();
-        headers.insert(
-            ShortString::from("x-stream-transaction-id"),
-            AMQPValue::LongString(uuid.as_str().into()),
-        );
-        channel
-            .basic_publish(
-                message.exchange.as_str(),
-                message.routing_key.as_str(),
-                lapin::options::BasicPublishOptions::default(),
-                message.data.as_slice(),
-                lapin::BasicProperties::default()
-                    .with_headers(headers)
-                    .with_timestamp(timestamp_u64),
-            )
-            .await?;
-        replayed_messages.push(ReplayedMessage {
-            offset: None,
-            transaction_id: Some(uuid),
-            timestamp: Some(timestamp),
-            data: String::from_utf8(message.data)?,
-        });
+        match (
+            message_options.enable_timestamp,
+            message_options.transaction_header.clone(),
+        ) {
+            (true, None) => {
+                let timestamp = chrono::Utc::now();
+                let timestamp_u64 = timestamp.timestamp_millis() as u64;
+                channel
+                    .basic_publish(
+                        message.exchange.as_str(),
+                        message.routing_key.as_str(),
+                        lapin::options::BasicPublishOptions::default(),
+                        message.data.as_slice(),
+                        lapin::BasicProperties::default().with_timestamp(timestamp_u64),
+                    )
+                    .await?;
+                replayed_messages.push(ReplayedMessage {
+                    offset: None,
+                    transaction: None,
+                    timestamp: Some(timestamp),
+                    data: String::from_utf8(message.data)?,
+                });
+            }
+            (true, Some(transaction_header)) => {
+                let timestamp = chrono::Utc::now();
+                let timestamp_u64 = timestamp.timestamp_millis() as u64;
+                let uuid = uuid::Uuid::new_v4().to_string();
+                let mut headers = FieldTable::default();
+                headers.insert(
+                    ShortString::from(transaction_header.as_str()),
+                    AMQPValue::LongString(uuid.as_str().into()),
+                );
+                channel
+                    .basic_publish(
+                        message.exchange.as_str(),
+                        message.routing_key.as_str(),
+                        lapin::options::BasicPublishOptions::default(),
+                        message.data.as_slice(),
+                        lapin::BasicProperties::default()
+                            .with_headers(headers)
+                            .with_timestamp(timestamp_u64),
+                    )
+                    .await?;
+                replayed_messages.push(ReplayedMessage {
+                    offset: None,
+                    transaction: Some(TransactionHeader {
+                        name: transaction_header,
+                        value: uuid,
+                    }),
+                    timestamp: Some(timestamp),
+                    data: String::from_utf8(message.data)?,
+                });
+            }
+            (false, None) => {
+                channel
+                    .basic_publish(
+                        message.exchange.as_str(),
+                        message.routing_key.as_str(),
+                        lapin::options::BasicPublishOptions::default(),
+                        message.data.as_slice(),
+                        lapin::BasicProperties::default(),
+                    )
+                    .await?;
+                replayed_messages.push(ReplayedMessage {
+                    offset: None,
+                    transaction: None,
+                    timestamp: None,
+                    data: String::from_utf8(message.data)?,
+                });
+            }
+            (false, Some(transaction_header)) => {
+                let uuid = uuid::Uuid::new_v4().to_string();
+                let mut headers = FieldTable::default();
+                headers.insert(
+                    ShortString::from(transaction_header.as_str()),
+                    AMQPValue::LongString(uuid.as_str().into()),
+                );
+                channel
+                    .basic_publish(
+                        message.exchange.as_str(),
+                        message.routing_key.as_str(),
+                        lapin::options::BasicPublishOptions::default(),
+                        message.data.as_slice(),
+                        lapin::BasicProperties::default().with_headers(headers),
+                    )
+                    .await?;
+                replayed_messages.push(ReplayedMessage {
+                    offset: None,
+                    transaction: Some(TransactionHeader {
+                        name: transaction_header,
+                        value: uuid,
+                    }),
+                    timestamp: None,
+                    data: String::from_utf8(message.data)?,
+                });
+            }
+        }
     }
     Ok(replayed_messages)
 }
