@@ -28,6 +28,19 @@ pub struct TransactionHeader {
     value: String,
 }
 
+impl TransactionHeader {
+    pub fn from_fieldtable(field_table: FieldTable, header_name: &str) -> Result<Self> {
+        let transaction_id = match field_table.inner().get(header_name) {
+            Some(AMQPValue::LongString(transaction_id)) => transaction_id.to_string(),
+            _ => return Err(anyhow!("Transaction header {} not found", header_name)),
+        };
+        Ok(Self {
+            name: header_name.to_string(),
+            value: transaction_id,
+        })
+    }
+}
+
 pub async fn replay_time_frame(
     pool: &deadpool_lapin::Pool,
     rabbitmq_api_config: &RabbitmqApiConfig,
@@ -309,76 +322,36 @@ pub async fn publish_message(
     let mut replayed_messages = Vec::new();
 
     while let Some(message) = s.next().await {
-        match (
+        let mut transaction: Option<TransactionHeader> = None;
+        let mut timestamp: Option<chrono::DateTime<chrono::Utc>> = None;
+        let basic_props = match (
             message_options.enable_timestamp,
             message_options.transaction_header.clone(),
         ) {
             (true, None) => {
-                let timestamp = chrono::Utc::now();
-                let timestamp_u64 = timestamp.timestamp_millis() as u64;
-                channel
-                    .basic_publish(
-                        message.exchange.as_str(),
-                        message.routing_key.as_str(),
-                        lapin::options::BasicPublishOptions::default(),
-                        message.data.as_slice(),
-                        lapin::BasicProperties::default().with_timestamp(timestamp_u64),
-                    )
-                    .await?;
-                replayed_messages.push(ReplayedMessage {
-                    offset: None,
-                    transaction: None,
-                    timestamp: Some(timestamp),
-                    data: String::from_utf8(message.data)?,
-                });
+                timestamp = Some(chrono::Utc::now());
+                let timestamp_u64 = timestamp.unwrap().timestamp_millis() as u64;
+                lapin::BasicProperties::default().with_timestamp(timestamp_u64)
             }
             (true, Some(transaction_header)) => {
-                let timestamp = chrono::Utc::now();
-                let timestamp_u64 = timestamp.timestamp_millis() as u64;
+                timestamp = Some(chrono::Utc::now());
+                let timestamp_u64 = timestamp.unwrap().timestamp_millis() as u64;
                 let uuid = uuid::Uuid::new_v4().to_string();
                 let mut headers = FieldTable::default();
                 headers.insert(
                     ShortString::from(transaction_header.as_str()),
                     AMQPValue::LongString(uuid.as_str().into()),
                 );
-                channel
-                    .basic_publish(
-                        message.exchange.as_str(),
-                        message.routing_key.as_str(),
-                        lapin::options::BasicPublishOptions::default(),
-                        message.data.as_slice(),
-                        lapin::BasicProperties::default()
-                            .with_headers(headers)
-                            .with_timestamp(timestamp_u64),
-                    )
-                    .await?;
-                replayed_messages.push(ReplayedMessage {
-                    offset: None,
-                    transaction: Some(TransactionHeader {
-                        name: transaction_header,
-                        value: uuid,
-                    }),
-                    timestamp: Some(timestamp),
-                    data: String::from_utf8(message.data)?,
-                });
+                transaction = TransactionHeader::from_fieldtable(
+                    headers.clone(),
+                    transaction_header.as_str(),
+                )
+                .ok();
+                lapin::BasicProperties::default()
+                    .with_headers(headers)
+                    .with_timestamp(timestamp_u64)
             }
-            (false, None) => {
-                channel
-                    .basic_publish(
-                        message.exchange.as_str(),
-                        message.routing_key.as_str(),
-                        lapin::options::BasicPublishOptions::default(),
-                        message.data.as_slice(),
-                        lapin::BasicProperties::default(),
-                    )
-                    .await?;
-                replayed_messages.push(ReplayedMessage {
-                    offset: None,
-                    transaction: None,
-                    timestamp: None,
-                    data: String::from_utf8(message.data)?,
-                });
-            }
+            (false, None) => lapin::BasicProperties::default(),
             (false, Some(transaction_header)) => {
                 let uuid = uuid::Uuid::new_v4().to_string();
                 let mut headers = FieldTable::default();
@@ -386,26 +359,31 @@ pub async fn publish_message(
                     ShortString::from(transaction_header.as_str()),
                     AMQPValue::LongString(uuid.as_str().into()),
                 );
-                channel
-                    .basic_publish(
-                        message.exchange.as_str(),
-                        message.routing_key.as_str(),
-                        lapin::options::BasicPublishOptions::default(),
-                        message.data.as_slice(),
-                        lapin::BasicProperties::default().with_headers(headers),
-                    )
-                    .await?;
-                replayed_messages.push(ReplayedMessage {
-                    offset: None,
-                    transaction: Some(TransactionHeader {
-                        name: transaction_header,
-                        value: uuid,
-                    }),
-                    timestamp: None,
-                    data: String::from_utf8(message.data)?,
-                });
+                transaction = TransactionHeader::from_fieldtable(
+                    headers.clone(),
+                    transaction_header.as_str(),
+                )
+                .ok();
+                lapin::BasicProperties::default().with_headers(headers)
             }
-        }
+        };
+
+        channel
+            .basic_publish(
+                message.exchange.as_str(),
+                message.routing_key.as_str(),
+                lapin::options::BasicPublishOptions::default(),
+                message.data.as_slice(),
+                basic_props,
+            )
+            .await?;
+
+        replayed_messages.push(ReplayedMessage {
+            offset: None,
+            transaction,
+            timestamp,
+            data: String::from_utf8(message.data)?,
+        });
     }
     Ok(replayed_messages)
 }
