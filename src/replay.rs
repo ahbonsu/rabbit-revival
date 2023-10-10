@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::{HeaderReplay, MessageOptions, MessageQuery, RabbitmqApiConfig, TimeFrameReplay};
 
 #[derive(Serialize, Debug)]
-pub struct ReplayedMessage {
+pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u64>,
     transaction: Option<TransactionHeader>,
@@ -105,7 +105,7 @@ pub async fn fetch_messages(
     rabbitmq_api_config: &RabbitmqApiConfig,
     message_options: &MessageOptions,
     message_query: MessageQuery,
-) -> Result<Vec<ReplayedMessage>> {
+) -> Result<Vec<Message>> {
     let message_count =
         match get_queue_message_count(&rabbitmq_api_config, message_query.queue.as_str()).await? {
             Some(message_count) => message_count,
@@ -161,7 +161,7 @@ pub async fn fetch_messages(
         match is_within_timeframe(timestamp, message_query.from, message_query.to) {
             Some(true) => {
                 if *offset >= i64::try_from(message_count - 1)? {
-                    messages.push(ReplayedMessage {
+                    messages.push(Message {
                         offset: Some(*offset as u64),
                         transaction,
                         timestamp: Some(
@@ -174,7 +174,7 @@ pub async fn fetch_messages(
                     });
                     break;
                 }
-                messages.push(ReplayedMessage {
+                messages.push(Message {
                     offset: Some(*offset as u64),
                     transaction,
                     timestamp: Some(
@@ -194,7 +194,7 @@ pub async fn fetch_messages(
             }
             None => {
                 if *offset >= i64::try_from(message_count - 1)? {
-                    messages.push(ReplayedMessage {
+                    messages.push(Message {
                         offset: Some(*offset as u64),
                         transaction,
                         timestamp: None,
@@ -202,7 +202,7 @@ pub async fn fetch_messages(
                     });
                     break;
                 }
-                messages.push(ReplayedMessage {
+                messages.push(Message {
                     offset: Some(*offset as u64),
                     transaction,
                     timestamp: None,
@@ -315,7 +315,7 @@ pub async fn publish_message(
     pool: &deadpool_lapin::Pool,
     message_options: &MessageOptions,
     messages: Vec<Delivery>,
-) -> Result<Vec<ReplayedMessage>> {
+) -> Result<Vec<Message>> {
     let connection = pool.get().await?;
     let channel = connection.create_channel().await?;
     let mut s = stream::iter(messages);
@@ -378,7 +378,7 @@ pub async fn publish_message(
             )
             .await?;
 
-        replayed_messages.push(ReplayedMessage {
+        replayed_messages.push(Message {
             offset: None,
             transaction,
             timestamp,
