@@ -410,7 +410,7 @@ fn is_within_timeframe(
             }
         }
         None => match (from, to) {
-            (None, None) => Some(true),
+            (None, None) => None,
             _ => Some(false),
         },
     }
