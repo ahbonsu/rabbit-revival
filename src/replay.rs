@@ -418,6 +418,7 @@ fn is_within_timeframe(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone, Utc};
     use lapin::{
         options::{BasicPublishOptions, QueueDeclareOptions, QueueDeleteOptions},
         protocol::basic::AMQPProperties,
@@ -459,7 +460,7 @@ mod tests {
             .unwrap();
 
         for i in 0..500 {
-            let timestamp = chrono::Utc::now().timestamp_millis() as u64;
+            let timestamp = Utc::now().timestamp_millis() as u64;
             let transaction_id = format!("transaction_{}", i);
             let mut headers = FieldTable::default();
             headers.insert(
@@ -484,8 +485,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foo() {
-        setup().await;
-        assert_eq!(true, true);
+    async fn test_is_within_timeframe() {
+        let tests = vec![
+            (
+                Some(Utc.with_ymd_and_hms(2021, 10, 13, 0, 0, 0).unwrap()), // October 13, 2021 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(false),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2022, 3, 13, 0, 0, 0).unwrap()), // March 13, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(true),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2022, 8, 13, 0, 0, 0).unwrap()), // August 13, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(true),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2023, 1, 13, 0, 0, 0).unwrap()), // January 13, 2023 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(false),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2023, 6, 13, 0, 0, 0).unwrap()), // June 13, 2023 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(false),
+            ),
+            (
+                None,
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(false),
+            ),
+            (None, None, None, None),
+            (
+                None,
+                None,
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(false),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                None,
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                Some(true),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                None,
+                Some(false),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
+                None,
+                Some(true),
+            ),
+            (
+                Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
+                None,
+                None,
+                Some(true),
+            ),
+        ];
+
+        for (date, from, to, expected) in tests {
+            assert_eq!(
+                expected,
+                super::is_within_timeframe(
+                    date.map(|date| date.timestamp_millis() as u64),
+                    from,
+                    to
+                )
+            );
+        }
     }
 }
