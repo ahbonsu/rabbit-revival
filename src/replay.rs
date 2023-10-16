@@ -16,16 +16,16 @@ use crate::{HeaderReplay, MessageOptions, MessageQuery, RabbitmqApiConfig, TimeF
 #[derive(Serialize, Debug)]
 pub struct Message {
     #[serde(skip_serializing_if = "Option::is_none")]
-    offset: Option<u64>,
-    transaction: Option<TransactionHeader>,
-    timestamp: Option<chrono::DateTime<chrono::Utc>>,
-    data: String,
+    pub offset: Option<u64>,
+    pub transaction: Option<TransactionHeader>,
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub data: String,
 }
 
 #[derive(Serialize, Debug)]
 pub struct TransactionHeader {
-    name: String,
-    value: String,
+    pub name: String,
+    pub value: String,
 }
 
 impl TransactionHeader {
@@ -419,70 +419,6 @@ fn is_within_timeframe(
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use lapin::{
-        options::{BasicPublishOptions, QueueDeclareOptions, QueueDeleteOptions},
-        protocol::basic::AMQPProperties,
-        types::{AMQPValue, FieldTable, ShortString},
-        Connection, ConnectionProperties,
-    };
-
-    async fn setup() {
-        let connection = Connection::connect(
-            "amqp://guest:guest@localhost:5672",
-            ConnectionProperties::default(),
-        )
-        .await
-        .unwrap();
-
-        let channel = connection.create_channel().await.unwrap();
-
-        let _ = channel
-            .queue_delete("replay", QueueDeleteOptions::default())
-            .await;
-
-        let mut queue_args = FieldTable::default();
-        queue_args.insert(
-            ShortString::from("x-queue-type"),
-            AMQPValue::LongString("stream".into()),
-        );
-
-        channel
-            .queue_declare(
-                "replay",
-                QueueDeclareOptions {
-                    durable: true,
-                    auto_delete: false,
-                    ..Default::default()
-                },
-                queue_args,
-            )
-            .await
-            .unwrap();
-
-        for i in 0..500 {
-            let timestamp = Utc::now().timestamp_millis() as u64;
-            let transaction_id = format!("transaction_{}", i);
-            let mut headers = FieldTable::default();
-            headers.insert(
-                ShortString::from("x-stream-transaction-id"),
-                AMQPValue::LongString(transaction_id.clone().into()),
-            );
-
-            channel
-                .basic_publish(
-                    "",
-                    "replay",
-                    BasicPublishOptions::default(),
-                    b"test",
-                    AMQPProperties::default()
-                        .with_headers(headers)
-                        .with_timestamp(timestamp),
-                )
-                .await
-                .unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
 
     #[tokio::test]
     async fn test_is_within_timeframe() {
@@ -539,19 +475,19 @@ mod tests {
             (
                 Some(Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
                 Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
-                None,
+                None,                                                     // No To date
                 Some(false),
             ),
             (
                 Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
                 Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2023 00:00:00 UTC
-                None,
+                None,                                                     // No To date
                 Some(true),
             ),
             (
                 Some(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()), // January 1, 2022 00:00:00 UTC
-                None,
-                None,
+                None,                                                     // No From date
+                None,                                                     // No To date
                 Some(true),
             ),
         ];

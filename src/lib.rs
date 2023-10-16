@@ -9,7 +9,7 @@ use axum::{
 use chrono::DateTime;
 use deadpool_lapin::{Config, PoolConfig, Runtime};
 use replay::{fetch_messages, replay_header, replay_time_frame};
-mod replay;
+pub mod replay;
 
 #[derive(serde::Deserialize, Debug)]
 #[serde(untagged)]
@@ -20,9 +20,9 @@ pub enum ReplayMode {
 
 #[derive(serde::Deserialize, Debug)]
 pub struct TimeFrameReplay {
-    queue: String,
-    from: DateTime<chrono::Utc>,
-    to: DateTime<chrono::Utc>,
+    pub queue: String,
+    pub from: DateTime<chrono::Utc>,
+    pub to: DateTime<chrono::Utc>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -39,9 +39,9 @@ struct AMQPHeader {
 
 #[derive(serde::Deserialize, Debug)]
 pub struct MessageQuery {
-    queue: String,
-    from: Option<DateTime<chrono::Utc>>,
-    to: Option<DateTime<chrono::Utc>>,
+    pub queue: String,
+    pub from: Option<DateTime<chrono::Utc>>,
+    pub to: Option<DateTime<chrono::Utc>>,
 }
 
 pub struct AppState {
@@ -52,16 +52,16 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub struct MessageOptions {
-    transaction_header: Option<String>,
-    enable_timestamp: bool,
+    pub transaction_header: Option<String>,
+    pub enable_timestamp: bool,
 }
 
 #[derive(Debug)]
 pub struct RabbitmqApiConfig {
-    username: String,
-    password: String,
-    host: String,
-    port: String,
+    pub username: String,
+    pub password: String,
+    pub host: String,
+    pub port: String,
 }
 pub async fn get_messages(
     app_state: State<Arc<AppState>>,
