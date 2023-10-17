@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use deadpool_lapin::{Config, PoolConfig, Runtime};
+use futures_lite::stream;
 use lapin::{
     options::{BasicPublishOptions, QueueDeclareOptions, QueueDeleteOptions},
     protocol::basic::AMQPProperties,
@@ -9,7 +10,7 @@ use lapin::{
 };
 use rabbit_revival::{
     replay::{fetch_messages, replay_time_frame, Message, TransactionHeader},
-    MessageQuery, RabbitmqApiConfig, TimeFrameReplay,
+    HeaderReplay, MessageQuery, RabbitmqApiConfig, TimeFrameReplay,
 };
 use testcontainers::{clients, GenericImage};
 
@@ -76,6 +77,7 @@ async fn create_dummy_data(
             data: String::from_utf8(data.to_vec())?,
             timestamp: Some(chrono::Utc.timestamp_millis_opt(timestamp as i64).unwrap()),
         });
+        tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
     }
     Ok(messages)
 }
@@ -267,9 +269,108 @@ async fn i_test_replay_time_frame() -> Result<()> {
         to: published_messages.last().unwrap().timestamp.unwrap(),
     };
 
-    let messages = replay_time_frame(&pool, &rabbitmq_config, time_frame_replay).await?;
+    let replayed_messages = replay_time_frame(&pool, &rabbitmq_config, time_frame_replay).await?;
 
-    assert_eq!(messages.len(), message_count as usize);
+    assert_eq!(replayed_messages.len(), published_messages.len());
+
+    replayed_messages.iter().enumerate().for_each(|(i, m)| {
+        let m = m.clone();
+        assert_eq!(
+            String::from_utf8(m.data.clone()).unwrap(),
+            published_messages[i].data
+        );
+        let headers = m.properties.headers().clone().unwrap();
+        let offset = headers.inner().get("x-stream-offset").unwrap();
+        let offset = match offset {
+            AMQPValue::LongLongInt(i) => i,
+            _ => panic!("offset not found"),
+        };
+        let timestamp = m.properties.timestamp().unwrap();
+        let timestamp = Utc.timestamp_millis_opt(timestamp as i64).unwrap();
+        assert_eq!(*offset as u64, published_messages[i].offset.unwrap());
+        assert_eq!(timestamp, published_messages[i].timestamp.unwrap());
+    });
+
+    let time_frame_replay = TimeFrameReplay {
+        queue: queue_name.to_string(),
+        from: published_messages.last().unwrap().timestamp.unwrap(),
+        to: published_messages.last().unwrap().timestamp.unwrap(),
+    };
+    let replayed_messages = replay_time_frame(&pool, &rabbitmq_config, time_frame_replay).await?;
+    assert_eq!(replayed_messages.len(), 1);
+
+    assert_eq!(
+        String::from_utf8(replayed_messages[0].data.clone()).unwrap(),
+        published_messages.last().unwrap().data
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn i_test_replay_header() -> Result<()> {
+    let docker = clients::Cli::default();
+    let image = GenericImage::new("rabbitmq", "3.12-management").with_wait_for(
+        testcontainers::core::WaitFor::message_on_stdout("started TCP listener on [::]:5672"),
+    );
+    let image = image.with_exposed_port(5672).with_exposed_port(15672);
+    let node = docker.run(image);
+    let amqp_port = node.get_host_port_ipv4(5672);
+    let management_port = node.get_host_port_ipv4(15672);
+
+    let message_count = 500;
+    let queue_name = "replay";
+    let published_messages = create_dummy_data(amqp_port, message_count, queue_name).await?;
+    let client = reqwest::Client::new();
+    loop {
+        let res = client
+            .get(format!(
+                "http://localhost:{}/api/queues/%2f/{}",
+                management_port, queue_name
+            ))
+            .basic_auth("guest", Some("guest"))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+        match res.get("messages") {
+            Some(m) => {
+                match res.get("type") {
+                    Some(t) => assert_eq!(t.as_str().unwrap(), "stream"),
+                    None => panic!("type not found"),
+                }
+                assert_eq!(m.as_i64().unwrap(), message_count);
+                break;
+            }
+            None => continue,
+        }
+    }
+
+    let mut cfg = Config::default();
+    cfg.url = Some(format!("amqp://guest:guest@localhost:{}/%2f", amqp_port));
+
+    cfg.pool = Some(PoolConfig::new(1));
+
+    let pool = cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+    let rabbitmq_config = RabbitmqApiConfig {
+        username: "guest".to_string(),
+        password: "guest".to_string(),
+        host: "localhost".to_string(),
+        port: management_port.to_string(),
+    };
+
+    for m in published_messages {
+        let header_replay = HeaderReplay {
+            queue: queue_name.to_string(),
+            header: rabbit_revival::AMQPHeader {
+                name: "x-stream-transaction-id".to_string(),
+                value: m.transaction.unwrap().value,
+            },
+        };
+        let replayed_messages =
+            rabbit_revival::replay::replay_header(&pool, &rabbitmq_config, header_replay).await?;
+        assert_eq!(replayed_messages.len(), 1);
+    }
 
     Ok(())
 }

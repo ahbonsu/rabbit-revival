@@ -27,14 +27,14 @@ pub struct TimeFrameReplay {
 
 #[derive(serde::Deserialize, Debug)]
 pub struct HeaderReplay {
-    queue: String,
-    header: AMQPHeader,
+    pub queue: String,
+    pub header: AMQPHeader,
 }
 
 #[derive(serde::Deserialize, Debug)]
-struct AMQPHeader {
-    name: String,
-    value: String,
+pub struct AMQPHeader {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(serde::Deserialize, Debug)]
