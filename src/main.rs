@@ -64,6 +64,7 @@ fn setup_metrics_recorder() -> PrometheusHandle {
 async fn main_app() -> Router {
     Router::new()
         .route("/", get(get_messages).post(replay))
+        .route("/health", get(|| async { "OK" }))
         .layer(TraceLayer::new_for_http())
         .with_state(initialize_state().await)
         .route_layer(middleware::from_fn(track_metrics))
