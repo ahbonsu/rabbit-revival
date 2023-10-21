@@ -47,7 +47,7 @@ pub async fn replay_time_frame(
     time_frame: TimeFrameReplay,
 ) -> Result<Vec<Delivery>> {
     let message_count =
-        match get_queue_message_count(&rabbitmq_api_config, &time_frame.queue).await? {
+        match get_queue_message_count(rabbitmq_api_config, &time_frame.queue).await? {
             Some(message_count) => message_count,
             None => return Err(anyhow!("Queue not found or empty")),
         };
@@ -107,7 +107,7 @@ pub async fn fetch_messages(
     message_query: MessageQuery,
 ) -> Result<Vec<Message>> {
     let message_count =
-        match get_queue_message_count(&rabbitmq_api_config, message_query.queue.as_str()).await? {
+        match get_queue_message_count(rabbitmq_api_config, message_query.queue.as_str()).await? {
             Some(message_count) => message_count,
             None => {
                 return Err(anyhow!("Queue not found or empty"));
@@ -220,7 +220,7 @@ pub async fn replay_header(
     header_replay: HeaderReplay,
 ) -> Result<Vec<Delivery>> {
     let message_count =
-        match get_queue_message_count(&rabbitmq_api_config, &header_replay.queue).await? {
+        match get_queue_message_count(rabbitmq_api_config, &header_replay.queue).await? {
             Some(message_count) => message_count,
             None => return Err(anyhow!("Queue not found or empty")),
         };

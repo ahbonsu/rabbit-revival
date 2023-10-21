@@ -1,7 +1,6 @@
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use deadpool_lapin::{Config, PoolConfig, Runtime};
-use futures_lite::stream;
 use lapin::{
     options::{BasicPublishOptions, QueueDeclareOptions, QueueDeleteOptions},
     protocol::basic::AMQPProperties,

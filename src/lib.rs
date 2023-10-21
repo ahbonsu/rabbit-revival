@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::DateTime;
-use deadpool_lapin::{Config, PoolConfig, Runtime};
+use deadpool_lapin::{PoolConfig, Runtime};
 use replay::{fetch_messages, replay_header, replay_time_frame};
 pub mod replay;
 
@@ -128,13 +128,14 @@ pub async fn initialize_state() -> Arc<AppState> {
         port: management_port.clone(),
     };
 
-    let mut cfg = Config::default();
-    cfg.url = Some(format!(
-        "amqp://{}:{}@{}:{}/%2f",
-        username, password, host, amqp_port
-    ));
-
-    cfg.pool = Some(PoolConfig::new(pool_size));
+    let cfg = deadpool_lapin::Config {
+        url: Some(format!(
+            "amqp://{}:{}@{}:{}/%2f",
+            username, password, host, amqp_port
+        )),
+        pool: Some(PoolConfig::new(pool_size)),
+        ..Default::default()
+    };
 
     let pool = cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
 
