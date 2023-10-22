@@ -92,7 +92,7 @@ pub async fn replay(
         }
     };
     let replayed_messages = replay::publish_message(&pool, &message_options, messages).await?;
-    Ok((StatusCode::OK, Json(replayed_messages)))
+    Ok((StatusCode::CREATED, Json(replayed_messages)))
 }
 
 pub async fn initialize_state() -> Arc<AppState> {
