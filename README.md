@@ -24,6 +24,12 @@ git clone https://github.com/DaAlbrecht/rabbit-revival.git
 cd rabbit-revival
 ```
 
+Run RabbitMQ server
+
+```bash
+docker run -it --rm --name rabbitmq -p 5552:5552 -p 5672:5672 -p 15672:15672 rabbitmq:3.12-management 
+```
+
 To generate some local dummy data run `cargo test -- --ignored`. 
 This will generate messages in the queue `replay` with timestamps and a transaction header with the name `x-stream-transaction-id`.
 
