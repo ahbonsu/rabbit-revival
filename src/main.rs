@@ -9,7 +9,7 @@ use axum::{
     Router,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use rabbit_revival::{get_messages, initialize_state, replay};
+use rabbit_revival::{get_messages, health, initialize_state, replay};
 use sysinfo::{CpuExt, System, SystemExt};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
@@ -64,7 +64,7 @@ fn setup_metrics_recorder() -> PrometheusHandle {
 async fn main_app() -> Router {
     Router::new()
         .route("/", get(get_messages).post(replay))
-        .route("/health", get(|| async { "OK" }))
+        .route("/health", get(health))
         .layer(TraceLayer::new_for_http())
         .with_state(initialize_state().await)
         .route_layer(middleware::from_fn(track_metrics))

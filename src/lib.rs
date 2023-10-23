@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::{
     extract::Json,
     extract::{Query, State},
@@ -93,6 +94,24 @@ pub async fn replay(
     };
     let replayed_messages = replay::publish_message(&pool, &message_options, messages).await?;
     Ok((StatusCode::CREATED, Json(replayed_messages)))
+}
+
+pub async fn health(app_state: State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let pool = app_state.pool.clone();
+    let connection = pool
+        .get()
+        .await
+        .context("Could not establish a connection to RabbitMQ")?;
+    let channel = connection
+        .create_channel()
+        .await
+        .context("Connection established, Could not create a channel")?;
+    let status = channel.status().state();
+
+    match status {
+        lapin::ChannelState::Connected => Ok((StatusCode::OK, "OK")),
+        _ => Err(AppError(anyhow::anyhow!("Chanel created, but not healthy"))),
+    }
 }
 
 pub async fn initialize_state() -> Arc<AppState> {
