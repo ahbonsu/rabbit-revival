@@ -35,19 +35,21 @@ This will generate messages in the queue `replay` with timestamps and a transact
 
 ## Start the server
 
+
+*maybe use this value as default for AMQP_TRANSACTION_HEADER?*
 ```bash
  export AMQP_TRANSACTION_HEADER=x-stream-transaction-id
  cargo run
 ```
 
 ## List messages 
-
+*using the root endpoint "/" can be ambiguous and unclear - maybe define a GET endpoint for /list?*
 ```bash
 curl 'localhost:3000/?queue=replay'  | jq
 ```
 
 ## Replay messages 
-
+*same as above- maybe define a POST/PUT endpoint for /replay?*
 ```bash
 curl localhost:3000 -H 'Content-Type: application/json'  -d '{"queue":"replay", "header":{"name":"x-stream-transaction-id","value":"transaction_499"}}' | jq
 ```
@@ -59,3 +61,9 @@ Contributions to the project are welcome! If you find any issues or have suggest
 ## License
 
 The Project is licensed under MIT license. Feel free to use, modify, and distribute it according to the terms of this license.
+
+
+**additional info anha:**
+- after replying a message, the value of the transaction id changes to a UUID
+- the sourcecode needs documentation, maybe according https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html
+- 
