@@ -16,6 +16,36 @@ rabbit-revival is a microservice that enables the replaying of RabbitMQ stream m
 | AMQP_ENABLE_TIMESTAMP     | Whether the AMQP messages have timestamps or not.    | true      |
 | ENABLE_METRICS            | Whether to enable metrics or not.                    | false     |
 
+
+# Usage
+
+```bash
+git clone https://github.com/DaAlbrecht/rabbit-revival.git
+cd rabbit-revival
+```
+
+To generate some local dummy data run `cargo test -- --ignored`. 
+This will generate messages in the queue `replay` with timestamps and a transaction header with the name `x-stream-transaction-id`.
+
+## Start the server
+
+```bash
+ export AMQP_TRANSACTION_HEADER=x-stream-transaction-id
+ cargo run
+```
+
+## List messages 
+
+```bash
+curl 'localhost:3000/?queue=replay'  | jq
+```
+
+## Replay messages 
+
+```bash
+curl localhost:3000 -H 'Content-Type: application/json'  -d '{"queue":"replay", "header":{"name":"x-stream-transaction-id","value":"transaction_499"}}' | jq
+```
+
 ## Contributing
 
 Contributions to the project are welcome! If you find any issues or have suggestions for improvements, please open an issue or submit a pull request on the project's repository.

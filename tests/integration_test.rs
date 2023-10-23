@@ -13,8 +13,8 @@ use rabbit_revival::{
 };
 use testcontainers::{clients, GenericImage};
 
-/*
 #[tokio::test]
+#[ignore]
 async fn local_data() {
     let message_count = 500;
     let queue_name = "replay";
@@ -22,7 +22,6 @@ async fn local_data() {
         .await
         .unwrap();
 }
-*/
 
 async fn create_dummy_data(
     port: u16,

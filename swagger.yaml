@@ -1,0 +1,114 @@
+openapi: 3.0.1
+info:
+  version: 1.0.0
+  title: RabbitMQ Replay API
+paths:
+  /replay:
+    get:
+      summary: Retrieve data from a specified time range and queue.
+      parameters:
+        - name: from
+          in: query
+          description: Start timestamp (inclusive).
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: End timestamp (exclusive).
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: queueName
+          in: query
+          description: Name of the queue.
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful retrieval of data.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+    post:
+      summary: Submit timestamps, a transaction ID, and a queue for replay.
+      requestBody:
+        description: Data to submit for replay.
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  properties:
+                    from:
+                      type: string
+                      format: date-time
+                    to:
+                      type: string
+                      format: date-time
+                    queueName:
+                      type: string
+                - type: object
+                  properties:
+                    transactionId:
+                      type: string
+                    queueName:
+                      type: string
+      responses:
+        '201':
+          description: Successful replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          description: Bad request. Neither timestamps nor transactionId submitted.
+        '404':
+          description: Transaction ID not found.
+        '500':
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+
+components:
+  schemas:
+    TransactionHeader:
+      type: object
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+
+    Message:
+      type: object
+      properties:
+        offset:
+          type: integer
+          format: int64
+        transaction:
+          $ref: '#/components/schemas/TransactionHeader' 
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: string
